@@ -1,0 +1,23 @@
+raw/
+*.duckdb
+*.duckdb.wal
+dbt_project/target/
+dbt_project/logs/
+dbt_project/dbt_packages/
+__pycache__/
+.venv/
+.env
+# date Cowrie locale: loguri, malware, chei SSH
+infra/honeypot/var/
+samples/
+
+# installere
+*.zip
+aws/    
+
+# fișiere generate de dbt și Airflow
+dbt_project/.user.yml
+.airflow/
+.venv-airflow/
+
+logs/
