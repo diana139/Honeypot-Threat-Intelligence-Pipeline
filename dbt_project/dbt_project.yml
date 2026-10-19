@@ -1,0 +1,21 @@
+name: honeypot
+version: "1.0.0"
+profile: honeypot
+
+model-paths: ["models"]
+snapshot-paths: ["snapshots"]
+seed-paths: ["seeds"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+
+models:
+  honeypot:
+    staging:
+      +schema: silver
+      +materialized: view
+      
+    intermediate:
+      +materialized: view
+    marts:
+      +schema: gold
+      +materialized: table
