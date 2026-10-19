@@ -11,8 +11,11 @@ macro-paths: ["macros"]
 models:
   honeypot:
     staging:
+      +schema: silver
       +materialized: view
+      
     intermediate:
       +materialized: view
     marts:
+      +schema: gold
       +materialized: table

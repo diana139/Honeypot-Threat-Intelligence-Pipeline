@@ -1,0 +1,131 @@
+version: 2
+
+models:
+  - name: dim_date
+    columns:
+      - name: date_key
+        data_tests: [unique, not_null]
+      - name: date_day
+        data_tests: [unique, not_null]
+
+  - name: dim_event_type
+    columns:
+      - name: event_type_key
+        data_tests: [unique, not_null]
+      - name: event_type
+        data_tests: [unique, not_null]
+
+  - name: dim_attacker
+    columns:
+      - name: attacker_key
+        data_tests: [unique, not_null]
+      # cheia naturala: un rand per IP
+      - name: src_ip
+        data_tests: [unique, not_null]
+
+  - name: dim_client
+    columns:
+      - name: client_key
+        data_tests: [unique, not_null]
+
+  - name: dim_credential
+    columns:
+      - name: credential_key
+        data_tests: [unique, not_null]
+      # password poate lipsi (login.failed fara parola), username nu
+      - name: username
+        data_tests: [not_null]
+
+  - name: dim_file
+    columns:
+      - name: file_key
+        data_tests: [unique, not_null]
+      - name: file_sha256
+        data_tests: [unique, not_null]
+
+  - name: fct_events
+    columns:
+      - name: event_id
+        data_tests: [unique, not_null]
+      - name: date_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_key
+      - name: attacker_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_attacker')
+                field: attacker_key
+      - name: event_type_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_event_type')
+                field: event_type_key
+      # cheile de mai jos sunt NULL pe evenimentele care nu au legatura cu dimensiunea respectiva
+      - name: client_key
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_client')
+                field: client_key
+      - name: credential_key
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_credential')
+                field: credential_key
+      - name: file_key
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_file')
+                field: file_key
+
+  - name: fct_sessions
+    columns:
+      - name: session_id
+        data_tests: [unique, not_null]
+      - name: date_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_key
+      - name: attacker_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_attacker')
+                field: attacker_key
+      - name: client_key
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_client')
+                field: client_key
+      - name: credential_key
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_credential')
+                field: credential_key
+
+  - name: campaigns
+    columns:
+      - name: campaign_key
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('fct_sessions')
+                field: campaign_key

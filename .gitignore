@@ -21,3 +21,4 @@ dbt_project/.user.yml
 .venv-airflow/
 
 logs/
+landing/
