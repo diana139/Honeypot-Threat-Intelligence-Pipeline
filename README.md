@@ -1,103 +1,93 @@
 # Real-Time Honeypot Threat Intelligence Pipeline
 
-Pipeline de date care colectează atacurile reale asupra unui honeypot SSH ([Cowrie](https://github.com/cowrie/cowrie)), le stochează într-un data lake pe S3 și le transformă într-un model dimensional (galaxy schema) pentru analiză de threat intelligence: cine atacă, cu ce credențiale, ce comenzi rulează, ce malware descarcă și care atacuri vin de la același operator.
+A data pipeline that collects real attacks against an SSH honeypot ([Cowrie](https://github.com/cowrie/cowrie)), stores them in an S3 data lake and turns them into a dimensional model (galaxy schema) for threat intelligence analysis: who attacks, with which credentials, what commands they run, what malware they download and which attacks come from the same operator.
 
-**Pe scurt:** în 41 de zile, honeypot-ul a primit **2,1 milioane de evenimente** din **275.392 de sesiuni**, de pe **6.739 de IP-uri**. 80% din sesiunile în care s-au rulat comenzi aparțin unor **26 de campanii automate** (botnet-uri), detectate după scriptul rulat și unealta SSH folosită.
+**In short:** over 41 days, the honeypot received **2.1 million events** from **275,392 sessions**, coming from **6,739 IP addresses**. 80% of the sessions that ran commands belong to **26 automated campaigns** (botnets), detected by the script they ran and the SSH tool they used.
 
-## Cuprins
+## Contents
 
-- [Setul de date](#setul-de-date)
-- [Arhitectură](#arhitectură)
-- [Modelul de date: galaxy schema](#modelul-de-date-galaxy-schema)
-- [Campanii](#campanii)
-- [Ce poți face cu datele](#ce-poți-face-cu-datele)
-- [Tehnologii](#tehnologii)
-- [Structura proiectului](#structura-proiectului)
-- [Cum rulezi](#cum-rulezi)
-- [Status și pașii următori](#status-și-pașii-următori)
+- [Dataset](#dataset)
+- [Architecture](#architecture)
+- [Data model: galaxy schema](#data-model-galaxy-schema)
+- [Campaigns](#campaigns)
+- [What you can do with the data](#what-you-can-do-with-the-data)
+- [Future improvements](#future-improvements)
+- [Tech stack](#tech-stack)
+- [Project structure](#project-structure)
+- [How to run](#how-to-run)
+- [Status and next steps](#status-and-next-steps)
 
-## Setul de date
+## Dataset
 
-### De unde vin datele
+### Where the data comes from
 
-Cowrie e un honeypot: un server SSH/Telnet fals, expus la internet, care simulează un sistem Linux. Orice conexiune primită e un atac sau o scanare, pentru că serverul nu are utilizatori reali. Cowrie acceptă login-ul, îi dă atacatorului un shell simulat și înregistrează tot: conexiunea, clientul SSH, parolele încercate, comenzile rulate, fișierele descărcate și traficul trimis prin tunel.
+Cowrie is a honeypot: a fake SSH/Telnet server, exposed to the internet, that simulates a Linux system. Every connection it receives is an attack or a scan, because the server has no real users. Cowrie accepts the login, gives the attacker a simulated shell and records everything: the connection, the SSH client, the passwords tried, the commands run, the files downloaded and the traffic sent through tunnels.
 
-Fiecare acțiune devine un **eveniment** JSON, cu un tip (`eventid`) și un `session` care leagă toate evenimentele aceleiași conexiuni.
+Every action becomes a JSON **event**, with a type (`eventid`) and a `session` that links all events of the same connection.
 
-### Perioada și volumul
+### Period and volume
 
 | | |
 |---|---|
-| Perioada | 01.09.2026 – 11.10.2026 (41 de zile) |
-| Evenimente | 2.097.515 |
-| Sesiuni (conexiuni) | 275.392 |
-| IP-uri atacatoare | 6.739, dintre care 3.485 s-au logat cu succes |
-| Perechi user/parolă distincte | 85.238 |
-| Comenzi distincte | 540 |
-| Fișiere descărcate/urcate distincte | 92 |
-| Clienți SSH distincți (versiune + HASSH) | 627 |
-| Ziua cu cele mai multe sesiuni | 05.10.2026 (23.596 de sesiuni) |
+| Period | 2026-09-01 – 2026-10-11 (41 days) |
+| Events | 2,097,515 |
+| Sessions (connections) | 275,392 |
+| Attacking IPs | 6,739, of which 3,485 logged in successfully |
+| Distinct username/password pairs | 85,238 |
+| Distinct commands | 540 |
+| Distinct files downloaded/uploaded | 92 |
+| Distinct SSH clients (version + HASSH) | 627 |
+| Busiest day | 2026-10-05 (23,596 sessions) |
 
-### Cum arată o sesiune tipică
+### What a typical session looks like
 
-O sesiune trece prin aceiași pași, iar fiecare pas generează unul sau mai multe evenimente:
+A session goes through the same steps, and every step produces one or more events:
 
 ```
 connect ──► client.version / client.kex ──► login.success / login.failed ──► command.input ... ──► session.closed
-            (ce program SSH folosește)       (user + parolă)                  (ce rulează)
-                                                                              file_download (ce descarcă)
-                                                                              direct-tcpip.* (folosește honeypot-ul ca proxy)
+            (which SSH program it uses)      (username + password)            (what it runs)
+                                                                              file_download (what it downloads)
+                                                                              direct-tcpip.* (uses the honeypot as a proxy)
 ```
 
-| Categorie | Tipuri de evenimente | Evenimente |
+| Category | Event types | Events |
 |---|---|---:|
-| sesiune | `session.connect`, `session.closed`, `session.params`, `log.closed` | 1.031.962 |
-| client SSH | `client.version`, `client.kex`, `client.fingerprint`, `client.size`, ... | 522.725 |
-| login | `login.success`, `login.failed` | 253.122 |
-| comenzi | `command.input`, `command.failed`, `command.success`, `command.chpasswd` | 244.145 |
-| tunel | `direct-tcpip.request`, `.data`, `.ja4`, `.ja4h` | 42.911 |
-| fișiere | `session.file_download`, `.file_upload`, `.file_download.failed` | 2.650 |
+| session | `session.connect`, `session.closed`, `session.params`, `log.closed` | 1,031,962 |
+| SSH client | `client.version`, `client.kex`, `client.fingerprint`, `client.size`, ... | 522,725 |
+| login | `login.success`, `login.failed` | 253,122 |
+| commands | `command.input`, `command.failed`, `command.success`, `command.chpasswd` | 244,145 |
+| tunnel | `direct-tcpip.request`, `.data`, `.ja4`, `.ja4h` | 42,911 |
+| files | `session.file_download`, `.file_upload`, `.file_download.failed` | 2,650 |
 
-### Ce se vede în date
+### What the data shows
 
-- **Aproape toate atacurile sunt automate.** Cel mai rulat lucru e `uname -s -v -n -r -m` (137.035 de execuții): botul verifică ce sistem a nimerit înainte să decidă ce face mai departe. Clientul SSH dominant e `SSH-2.0-Go`, adică scripturi scrise în Go, nu oameni cu un terminal.
-- **Login-ul reușește aproape mereu (99%)**, pentru că așa e configurat Cowrie: acceptă orice parolă, cu câteva excepții. Excepțiile se văd direct în date: `root/123456` (1.361 de încercări) și `root/root` (934) au 0 reușite.
-- **Credențialele încercate** sunt cele implicite sau slabe: `0/0`, `ubuntu/123456`, `ubuntu/ubuntu`, `admin/admin`, `root/12345678`. Perechea `345gs5662d34/345gs5662d34` (1.650 de încercări) e semnătura unui botnet cunoscut.
-- **Persistență prin chei SSH.** Cea mai răspândită campanie șterge `~/.ssh` și pune cheia publică a atacatorului în `authorized_keys`, ca să revină fără parolă (vezi [Campanii](#campanii)).
-- **Honeypot-ul e folosit ca proxy.** 7.471 de sesiuni au deschis tunele `direct-tcpip`, cele mai multe spre IP-uri Google pe portul 80. Atacatorii testează dacă proxy-ul funcționează înainte să-l folosească.
+- **Almost all attacks are automated.** The most frequently run command is `uname -s -v -n -r -m` (137,035 executions): the bot checks what kind of system it has landed on before deciding what to do next. The dominant SSH client is `SSH-2.0-Go`, meaning scripts written in Go, not people at a terminal.
+- **Logins almost always succeed (99%)**, because that is how Cowrie is configured: it accepts any password, with a few exceptions. The exceptions are visible in the data: `root/123456` (1,361 attempts) and `root/root` (934) have 0 successes.
+- **The credentials tried** are default or weak ones: `0/0`, `ubuntu/123456`, `ubuntu/ubuntu`, `admin/admin`, `root/12345678`. The pair `345gs5662d34/345gs5662d34` (1,650 attempts) is the signature of a known botnet.
+- **Persistence through SSH keys.** The most widespread campaign deletes `~/.ssh` and writes the attacker's public key into `authorized_keys`, so it can come back without a password (see [Campaigns](#campaigns)).
+- **The honeypot is used as a proxy.** 7,471 sessions opened `direct-tcpip` tunnels, most of them to Google IPs on port 80. Attackers check that the proxy works before using it.
 
-## Arhitectură
+## Architecture
 
 ```
- ┌──────────────┐  upload_logs.sh   ┌──────────────────────── S3 ────────────────────────┐
- │ Cowrie       │  (json → gzip)    │ raw/dt=YYYY-MM-DD/cowrie.json.gz                   │
- │ honeypot     │ ────────────────► │        │ Airflow: convert (DuckDB)                 │
- │ SSH / Telnet │                   │        ▼                                           │
- └──────────────┘                   │ bronze/cowrie_events/dt=YYYY-MM-DD/events.parquet  │
-                                    └────────┬───────────────────────────────────────────┘
-                                             │ Airflow: load
-                                             ▼
-                       ┌──────────────── warehouse.duckdb ────────────────┐
-                       │ bronze.cowrie_events      (tabel, copie 1:1)     │
-                       │        │ dbt                                     │
-                       │        ▼                                         │
-                       │ silver.stg_cowrie_events  (view, curățat)        │
-                       │        │ dbt                                     │
-                       │        ▼                                         │
-                       │ gold: fct_events, fct_sessions, dim_*, campaigns │
-                       └──────────────────────────────────────────────────┘
+ ┌── Hetzner VPS ──┐  cron   ┌──────────── S3 ────────────┐  Airflow  ┌──────── warehouse.duckdb ────────┐
+ │ Cowrie          │ ──────► │ raw/    (json.gz, per day) │ ────────► │ bronze → silver → gold (dbt)     │
+ │ SSH honeypot    │         │ bronze/ (Parquet, per day) │ ◄──────── │ fct_*, dim_*, campaigns          │
+ └─────────────────┘         └────────────────────────────┘  DuckDB   └──────────────────────────────────┘
+  honeypot-sensor                                            honeypot-analyst
+  (write-only to raw/)                                       (reads the lake, writes bronze/)
 ```
 
-| Strat | Unde | Format | Ce conține |
-|---|---|---|---|
-| raw | S3 `raw/` | JSON lines, gzip | logurile Cowrie exact cum ies din honeypot, o zi per fișier |
-| bronze | S3 `bronze/` + `bronze.cowrie_events` | Parquet (zstd) / tabel DuckDB | aceleași date, cu tipuri detectate automat |
-| silver | `silver.stg_cowrie_events` | view dbt | coloane redenumite, cheie unică per eveniment, testat |
-| gold | `gold.fct_*`, `gold.dim_*`, `gold.campaigns` | tabele dbt | model dimensional pentru analiză |
+- **The sensor** is a Hetzner VPS running Cowrie, which uploads each day's logs to S3 every night.
+- **The data lake** is a versioned S3 bucket with a `raw/` zone (untouched logs) and a `bronze/` zone (Parquet), both partitioned by day.
+- **The analytics platform** (Airflow, DuckDB and dbt, running locally in Docker) converts raw → bronze directly in S3 and builds the warehouse in layers: bronze → silver → gold.
+- **Security:** each component has its own IAM user with minimal permissions. The keys on the sensor, the most exposed machine, can only upload files to `raw/`: they cannot read, list or delete anything.
 
-## Modelul de date: galaxy schema
+Full diagram, bucket layout, IAM policies and server setup: [docs/documentation.md](docs/documentation.md#architecture).
 
-Stratul gold are **două tabele de fapte** care folosesc aceleași dimensiuni. Un model cu mai multe tabele de fapte care împart dimensiuni comune (*conformed dimensions*) se numește **galaxy schema** (sau *fact constellation*). E extensia naturală a unui star schema: regula lui Kimball e un tabel de fapte per granularitate, nu un singur tabel de fapte per model.
+## Data model: galaxy schema
+
+The gold layer has **two fact tables** that share the same dimensions. A model with several fact tables sharing common dimensions (*conformed dimensions*) is called a **galaxy schema** (or *fact constellation*). It is the natural extension of a star schema: Kimball's rule is one fact table per grain, not a single fact table per model.
 
 ```mermaid
 erDiagram
@@ -116,264 +106,184 @@ erDiagram
     fct_sessions   }o--o| campaigns    : "campaign_key"
 ```
 
-### Tabelele de fapte
+### Fact tables
 
-| Tabel | Granularitate (un rând =) | Rânduri | La ce întrebări răspunde |
+| Table | Grain (one row =) | Rows | Questions it answers |
 |---|---|---:|---|
-| `fct_events` | un eveniment Cowrie | 2.097.515 | ce parole se încearcă, ce comenzi se rulează, ce fișiere se descarcă |
-| `fct_sessions` | o sesiune (conexiune) | 275.392 | cât durează un atac, câte au login reușit, ce script a rulat atacatorul |
+| `fct_events` | one Cowrie event | 2,097,515 | which passwords are tried, which commands are run, which files are downloaded |
+| `fct_sessions` | one session (connection) | 275,392 | how long an attack lasts, how many logins succeed, which script the attacker ran |
 
-`fct_sessions` e un **tabel de fapte agregat**: e construit din `fct_events`, nu direct din sursă. Pe `fct_events` ai putea răspunde și la întrebări despre sesiuni, dar fiecare interogare ar trebui să refacă un `group by session_id` pe 2 milioane de rânduri. Unele măsuri nici nu există la nivel de eveniment, de exemplu `command_sequence` (lista ordonată a comenzilor) sau `login_success`. Testele dbt verifică că cele două tabele se potrivesc: suma evenimentelor pe sesiuni e egală cu numărul de evenimente.
+`fct_sessions` is an **aggregated fact table**: it is built from `fct_events`, not directly from the source. You could answer session questions from `fct_events`, but every query would have to redo a `group by session_id` over 2 million rows. Some measures don't even exist at event level, such as `command_sequence` (the ordered list of commands) or `login_success`. dbt tests check that the two tables agree: the sum of events across sessions equals the number of events.
 
-### Dimensiunile
+### Dimensions
 
-Fiecare dimensiune are o cheie surogat (`md5` din cheia naturală), deci aceleași chei se calculează identic în ambele tabele de fapte.
+Each dimension has a surrogate key (`md5` of the natural key), so the same keys are computed identically in both fact tables.
 
-| Dimensiune | Un rând = | Cheie naturală | Rânduri |
+| Dimension | One row = | Natural key | Rows |
 |---|---|---|---:|
-| `dim_date` | o zi | data | 41 |
-| `dim_event_type` | un tip de eveniment | `event_type` | 23 |
-| `dim_attacker` | un IP sursă | `src_ip` | 6.739 |
-| `dim_client` | un client SSH | versiune + HASSH | 627 |
-| `dim_credential` | o pereche user/parolă | username + password | 85.238 |
-| `dim_file` | un fișier descărcat/urcat | SHA256 | 92 |
+| `dim_date` | one day | date | 41 |
+| `dim_event_type` | one event type | `event_type` | 23 |
+| `dim_attacker` | one source IP | `src_ip` | 6,739 |
+| `dim_client` | one SSH client | version + HASSH | 627 |
+| `dim_credential` | one username/password pair | username + password | 85,238 |
+| `dim_file` | one downloaded/uploaded file | SHA256 | 92 |
 
-Cheile `client_key`, `credential_key` și `file_key` sunt NULL pe evenimentele care nu au legătură cu dimensiunea respectivă (de exemplu, un `session.connect` nu are credențiale).
+The keys `client_key`, `credential_key` and `file_key` are NULL on events unrelated to that dimension (for example, a `session.connect` has no credentials).
 
 ### `campaigns`
 
-Peste `fct_sessions` stă `campaigns` (26 de rânduri), un tabel de analiză cu un rând per campanie. Nu e o dimensiune propriu-zisă: `fct_sessions.campaign_key` există pentru orice sesiune cu comenzi (258 de semnături distincte), dar doar semnăturile văzute de pe cel puțin 10 IP-uri ajung în `campaigns`. Explicația completă e în secțiunea următoare.
+On top of `fct_sessions` sits `campaigns` (26 rows), an analysis table with one row per campaign. It is not a true dimension: `fct_sessions.campaign_key` exists for every session with commands (258 distinct signatures), but only signatures seen from at least 10 IPs make it into `campaigns`. The full explanation is in the next section.
 
-Toate coloanele și deciziile de design: [docs/data_model.md](docs/data_model.md).
+All columns and design decisions: [docs/documentation.md](docs/documentation.md#data-model).
 
-## Campanii
+## Campaigns
 
-### Problema
+### The problem
 
-Un botnet atacă de pe sute sau mii de IP-uri, care se schimbă mereu. Dacă te uiți doar la IP-uri, vezi 6.739 de atacatori independenți. În realitate, cea mai mare parte vin de la câțiva operatori.
+A botnet attacks from hundreds or thousands of IPs, which keep changing. If you only look at IPs, you see 6,739 independent attackers. In reality, most of them come from a handful of operators.
 
-### Ideea
+### The idea
 
-Două lucruri rămân la fel pe toate IP-urile unui botnet, pentru că vin din același cod:
+Two things stay the same across all IPs of a botnet, because they come from the same code:
 
-1. **Scriptul**: comenzile rulate într-o sesiune, în aceeași ordine.
-2. **Unealta**: programul SSH cu care se conectează, identificat prin **HASSH**. La conectare, clientul SSH trimite lista algoritmilor de criptare pe care îi știe, în ordinea lui. Fiecare program (OpenSSH, PuTTY, `libssh`, biblioteca SSH din Go) are lista lui, iar HASSH e hash-ul acestei liste. Cowrie îl calculează singur.
+1. **The script**: the commands run in a session, in the same order.
+2. **The tool**: the SSH program used to connect, identified by **HASSH**. When connecting, the SSH client sends the list of encryption algorithms it supports, in its own order. Every program (OpenSSH, PuTTY, `libssh`, Go's SSH library) has its own list, and HASSH is the hash of that list. Cowrie computes it automatically.
 
-**O campanie = aceeași unealtă (HASSH) + același script, văzute de pe cel puțin 10 IP-uri diferite.**
+**A campaign = the same tool (HASSH) + the same script, seen from at least 10 different IPs.**
 
-### Cum se calculează
+### How it is computed
 
 ```
 fct_events ──► fct_sessions ──────────────────────────────────────► campaigns
                command_sequence      = "cd ~; chattr -ia .ssh ; ..."   group by campaign_key
-               command_sequence_hash = md5(comenzi normalizate)        having count(distinct IP) >= 10
+               command_sequence_hash = md5(normalized commands)        having count(distinct IP) >= 10
                campaign_key          = md5(hassh | command_sequence_hash)
 ```
 
-Înainte de hash, comenzile sunt **normalizate**: cifrele și șirurile hex lungi devin `N`. Unele scripturi pun valori aleatoare în comenzi (parole noi, nume de fișiere), iar fără normalizare fiecare rulare ar părea un script diferit.
+Before hashing, commands are **normalized**: digits and long hex strings become `N`. Some scripts put random values in their commands (new passwords, file names), and without normalization every run would look like a different script.
 
-Pragul de 10 IP-uri e variabila dbt `campaign_min_ips`:
+The 10-IP threshold is configurable (the `campaign_min_ips` parameter, see [docs/documentation.md](docs/documentation.md#parameters)).
+
+### Results
+
+26 campaigns, from 3,007 IPs, covering 187,980 sessions (80% of the sessions with commands). The largest ones, by number of IPs:
+
+| What the script does | IPs | Sessions | Active days |
+|---|---:|---:|---:|
+| **SSH key implant** (`mdrfckr`): deletes `~/.ssh`, writes the attacker's key into `authorized_keys`, locks the file | 1,052 | 1,529 | 41 |
+| Reconnaissance: `uname -a 2>/dev/null` | 946 | 8,343 | 6 |
+| Reconnaissance: `uname -a 2>/dev/null`, different SSH tool | 660 | 21,359 | 13 |
+| Reconnaissance: `uname -s -v -n -r -m` | 131 | 136,938 | 39 |
+| SSH key implant, same script, different SSH tool | 73 | 136 | 37 |
+| MikroTik router reconnaissance + hunting for competing miners (`/ip cloud print`, `ps \| grep '[Mm]iner'`, ...) | 32 | 37 | 24 |
+
+A few observations:
+
+- **The `mdrfckr` implant** is active every single day of the collection period. It runs from 1,052 IPs, but always with the same public key, so it is a single operator. The `authorized_keys` file created by the script is recorded by Cowrie as a `file_download` and always has the same hash.
+- **The same script with different tools** shows up as two campaigns (rows 1 and 5). These may be different versions of the same bot, or operators who copied the script.
+- **The sessions / IPs ratio** reveals behavior: the `uname -s -v -n -r -m` campaign has 131 IPs but 136,938 sessions, meaning each IP comes back more than 1,000 times. The key implant comes once or twice from each IP.
+
+Method limitations and all `campaigns` columns: [docs/documentation.md](docs/documentation.md#campaigns).
+
+## What you can do with the data
+
+Each question below is a ready-to-run query in [`analysis/queries/`](analysis/queries/):
+
+| Question | Query |
+|---|---|
+| What are the largest campaigns? | [`01_top_campaigns.sql`](analysis/queries/01_top_campaigns.sql) |
+| Which IPs does a campaign attack from? | [`02_campaign_ips.sql`](analysis/queries/02_campaign_ips.sql) |
+| Which passwords do attackers try? Useful as a banned-password list for your own infrastructure. | [`03_top_credentials.sql`](analysis/queries/03_top_credentials.sql) |
+| Which commands do they run? | [`04_top_commands.sql`](analysis/queries/04_top_commands.sql) |
+| What malware do they download? The SHA256 hashes can be looked up on [VirusTotal](https://www.virustotal.com) or [MalwareBazaar](https://bazaar.abuse.ch). | [`05_malware_files.sql`](analysis/queries/05_malware_files.sql) |
+| How do attacks evolve over time? | [`06_sessions_over_time.sql`](analysis/queries/06_sessions_over_time.sql) |
+| What kind of activity happens each day? | [`07_activity_by_category.sql`](analysis/queries/07_activity_by_category.sql) |
+| Who uses the honeypot as a proxy, and to reach what? | [`08_proxy_destinations.sql`](analysis/queries/08_proxy_destinations.sql) |
+| Which SSH tools do attackers use? | [`09_ssh_tools.sql`](analysis/queries/09_ssh_tools.sql) |
+
+Run one from the project root:
 
 ```bash
-dbt build --select campaigns --vars '{campaign_min_ips: 20}' --profiles-dir .
+duckdb -readonly warehouse.duckdb -f analysis/queries/01_top_campaigns.sql
 ```
 
-### Rezultate
+Or open them in the DuckDB UI (`duckdb warehouse.duckdb -ui`) and run them there.
 
-26 de campanii, de pe 3.007 IP-uri, care acoperă 187.980 de sesiuni (80% din sesiunile cu comenzi). Cele mai mari, după numărul de IP-uri:
+## Future improvements
 
-| Ce face scriptul | IP-uri | Sesiuni | Zile active |
-|---|---:|---:|---:|
-| **Implant de cheie SSH** (`mdrfckr`): șterge `~/.ssh`, scrie cheia atacatorului în `authorized_keys`, blochează fișierul | 1.052 | 1.529 | 41 |
-| Recunoaștere: `uname -a 2>/dev/null` | 946 | 8.343 | 6 |
-| Recunoaștere: `uname -a 2>/dev/null`, altă unealtă SSH | 660 | 21.359 | 13 |
-| Recunoaștere: `uname -s -v -n -r -m` | 131 | 136.938 | 39 |
-| Implant de cheie SSH, același script, altă unealtă SSH | 73 | 136 | 37 |
-| Recunoaștere routere MikroTik + căutare de minere concurente (`/ip cloud print`, `ps \| grep '[Mm]iner'`, ...) | 32 | 37 | 24 |
-
-Câteva observații:
-
-- **Implantul `mdrfckr`** e activ în fiecare zi din perioada colectată. Rulează de pe 1.052 de IP-uri, dar cu aceeași cheie publică, deci e un singur operator. Fișierul `authorized_keys` creat de script e înregistrat de Cowrie ca `file_download` și are mereu același hash.
-- **Același script cu unelte diferite** apare ca două campanii (rândurile 1 și 5). Pot fi versiuni diferite ale aceluiași bot sau operatori care au copiat scriptul.
-- **Raportul sesiuni / IP-uri** arată comportamentul: campania `uname -s -v -n -r -m` are 131 de IP-uri, dar 136.938 de sesiuni, adică fiecare IP revine de peste 1.000 de ori. Implantul de cheie vine o dată sau de două ori de pe fiecare IP.
-
-### Limitări
-
-- Scripturile cu o singură comandă scurtă (`uname -a`) sunt semnături slabe: aceeași comandă poate veni de la operatori diferiți, iar HASSH-ul îi separă doar dacă folosesc unelte diferite.
-- Potrivirea e exactă: un script care schimbă ordinea comenzilor sau adaugă una apare ca altă campanie.
-- Sesiunile fără comenzi (doar login, doar tunel) nu au semnătură, deci nu intră în nicio campanie.
-
-## Ce poți face cu datele
-
-### Întrebări la care poți răspunde deja
-
-**Care sunt cele mai mari campanii și de pe ce IP-uri atacă?**
-
-```sql
-select hassh, attackers, sessions, active_days, example_command_sequence
-from gold.campaigns
-order by attackers desc;
-
--- IP-urile unei campanii
-select a.src_ip, count(*) as sessions, min(s.started_at) as first_seen
-from gold.fct_sessions s
-join gold.dim_attacker a using (attacker_key)
-where s.campaign_key = '<campaign_key>'
-group by 1
-order by 2 desc;
-```
-
-**Ce parole încearcă atacatorii?** Util ca listă de parole interzise în propria infrastructură.
-
-```sql
-select username, password, attempts
-from gold.dim_credential
-order by attempts desc
-limit 50;
-```
-
-**Ce malware descarcă?** Hash-urile SHA256 se pot căuta direct pe [VirusTotal](https://www.virustotal.com) sau [MalwareBazaar](https://bazaar.abuse.ch).
-
-```sql
-select fl.file_sha256, fl.first_url, fl.downloads, count(distinct f.attacker_key) as attackers
-from gold.fct_events f
-join gold.dim_file fl using (file_key)
-group by all
-order by attackers desc;
-```
-
-**Cum evoluează atacurile în timp?**
-
-```sql
-select d.date_day, count(*) as sessions, count(*) filter (where s.campaign_key is not null) as with_commands
-from gold.fct_sessions s
-join gold.dim_date d using (date_key)
-group by 1
-order by 1;
-```
-
-**Care atacatori folosesc honeypot-ul ca proxy și spre ce destinații?**
-
-```sql
-select tunnel_dst_ip, tunnel_dst_port, count(*) as requests, count(distinct attacker_key) as attackers
-from gold.fct_events
-where tunnel_dst_ip is not null
-group by all
-order by requests desc
-limit 20;
-```
-
-Mai multe interogări: [docs/data_model.md](docs/data_model.md#interogări-utile) și [analysis/explore.sql](analysis/explore.sql).
-
-### Idei de extindere
-
-| Idee | Ce adaugă | Cum |
+| Idea | What it adds | How |
 |---|---|---|
-| **Geo-IP și ASN** | din ce țări și de la ce furnizori de hosting vin atacurile | `dim_attacker` + o bază [MaxMind GeoLite2](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data) sau [ipinfo](https://ipinfo.io) |
-| **Clasificarea comenzilor** | ce urmăresc atacatorii: recunoaștere, persistență, download, mining | `dim_command` cu reguli pe text, mapate pe tactici [MITRE ATT&CK](https://attack.mitre.org) |
-| **Blocklist** | o listă de IP-uri de blocat, exportată zilnic | IP-urile campaniilor active în ultimele N zile, scrise în S3 de un task Airflow |
-| **Alertă pentru campanii noi** | află când apare un script nou | un test dbt sau un task care compară `campaigns` cu ziua precedentă |
-| **Îmbogățirea fișierelor** | familia malware-ului (Mirai, XMRig, ...) | lookup SHA256 în API-ul VirusTotal sau MalwareBazaar |
-| **Dashboard** | vizualizare pentru cine nu scrie SQL | Evidence, Metabase sau Superset peste `gold` |
+| **Geo-IP and ASN** | which countries and which hosting providers the attacks come from | a weekly Airflow task downloads [IPinfo Lite](https://ipinfo.io/lite) (country + ASN, free) into DuckDB; a dbt model turns its CIDR networks into numeric IP ranges, and `dim_attacker` gets `country_code`, `country`, `asn`, `as_name` through a range join |
+| **Command classification** | what attackers are after: reconnaissance, persistence, download, mining | a `dim_command` with text rules, mapped to [MITRE ATT&CK](https://attack.mitre.org) tactics |
+| **Blocklist** | a daily exported list of IPs to block | IPs of campaigns active in the last N days, written to S3 by an Airflow task |
+| **New-campaign alert** | know when a new script shows up | a dbt test or a task that compares `campaigns` with the previous day |
+| **File enrichment** | the malware family (Mirai, XMRig, ...) | SHA256 lookup in the VirusTotal or MalwareBazaar API |
+| **Dashboard** | visualization for people who don't write SQL | Evidence, Metabase or Superset on top of `gold` |
 
-## Tehnologii
+## Tech stack
 
-- **Cowrie**: honeypot SSH/Telnet, rulat în Docker (`infra/honeypot/`)
-- **AWS S3**: data lake (zonele raw și bronze)
-- **Apache Airflow 3.3**: orchestrare (`dags/honeypot_dag.py`)
-- **DuckDB 1.5**: conversie JSON → Parquet direct în S3 și data warehouse local
-- **dbt (dbt-duckdb)**: transformări, teste și modelul dimensional (`dbt_project/`)
-- **Docker Compose**: Airflow + Postgres (metadate Airflow)
+- **Cowrie**: SSH/Telnet honeypot, running in Docker (`infra/honeypot/`)
+- **AWS S3 + IAM**: data lake (raw and bronze zones), with one IAM user for the sensor and one for the analytics platform
+- **Apache Airflow 3.3**: orchestration (`dags/honeypot_dag.py`)
+- **DuckDB 1.5**: JSON → Parquet conversion directly in S3, and the local data warehouse
+- **dbt (dbt-duckdb)**: transformations, tests and the dimensional model (`dbt_project/`)
+- **Docker Compose**: Airflow + Postgres (Airflow metadata)
 
-## Structura proiectului
+## Project structure
 
 ```
 .
-├── infra/honeypot/docker-compose.yml   # containerul Cowrie
-├── ingest/upload_logs.sh               # urcă logurile zilnice Cowrie în S3 (raw/)
-├── dags/honeypot_dag.py                # DAG Airflow: convert → load → validate
+├── infra/honeypot/docker-compose.yml   # the Cowrie container
+├── ingest/upload_logs.sh               # uploads the daily Cowrie logs to S3 (raw/)
+├── dags/honeypot_dag.py                # Airflow DAG: convert → load → staging → marts → validate → docs
 ├── dbt_project/
 │   ├── dbt_project.yml
-│   ├── profiles.yml                    # conexiunea DuckDB (DUCKDB_PATH)
-│   ├── macros/generate_schema_name.sql # schemele se numesc exact silver / gold
+│   ├── profiles.yml                    # DuckDB connection (DUCKDB_PATH)
+│   ├── macros/generate_schema_name.sql # schemas are named exactly silver / gold
 │   ├── models/
-│   │   ├── staging/                    # silver: stg_cowrie_events + teste
-│   │   └── marts/                      # gold: fct_*, dim_*, campaigns + teste
-│   └── tests/                          # teste de reconciliere între tabele
-├── analysis/explore.sql                # interogări ad-hoc pe datele din S3
-├── docs/data_model.md                  # documentația modelului de date
-├── Dockerfile                          # imaginea Airflow (+ dbt într-un venv separat)
+│   │   ├── staging/                    # silver: stg_cowrie_events + tests
+│   │   └── marts/                      # gold: fct_*, dim_*, campaigns + tests
+│   └── tests/                          # reconciliation tests between tables
+├── analysis/
+│   ├── queries/                        # ready-to-run queries on the gold layer, one per question
+│   └── explore.sql                     # ad-hoc queries directly on the raw data in S3
+├── docs/documentation.md               # technical docs: architecture, data model, operations
+├── Dockerfile                          # Airflow image (+ dbt in a separate venv)
 ├── docker-compose.yml                  # Airflow + Postgres
 └── .env.example
 ```
 
-## Cum rulezi
+## How to run
 
-### 1. Honeypot-ul (pe serverul expus la internet)
+**The sensor** (on the server): Cowrie in Docker and a cron job that uploads the logs to S3. The steps are in [docs/documentation.md](docs/documentation.md#the-sensor).
 
-```bash
-cd infra/honeypot
-docker compose up -d
-```
-
-Cowrie ascultă pe porturile 2222 (SSH) și 2223 (Telnet). Logurile ajung în `infra/honeypot/var/log/cowrie/`, rotite zilnic (`cowrie.json.YYYY-MM-DD`).
-
-`ingest/upload_logs.sh` comprimă fiecare zi încheiată și o urcă în `s3://<bucket>/raw/dt=YYYY-MM-DD/cowrie.json.gz`. Ține evidența fișierelor deja urcate în `.uploaded_logs`, deci poate fi rulat periodic (de exemplu din cron) fără duplicate.
-
-### 2. Airflow
+**The pipeline** (locally):
 
 ```bash
-cp .env.example .env        # completează AIRFLOW_JWT_SECRET și AIRFLOW_API_SECRET_KEY
-docker compose up -d
+cp .env.example .env        # fill in AIRFLOW_JWT_SECRET and AIRFLOW_API_SECRET_KEY
+docker compose up -d        # Airflow at http://localhost:8085
 ```
 
-UI-ul Airflow e la http://localhost:8085. Credențialele AWS sunt citite din `~/.aws` (montat read-only în containere).
+The `honeypot_dag` DAG runs daily at 04:00 UTC: `convert → load → transform_staging → transform_marts → validate → dbt_docs_generate`. AWS credentials are read from `~/.aws`.
 
-DAG-ul `honeypot_dag` rulează zilnic la 04:00 UTC:
-
-1. **convert**: pentru fiecare zi din `raw/` care nu există încă în `bronze/`, DuckDB citește JSON-ul direct din S3 și scrie Parquet înapoi în S3. Parametrul `full_refresh=true` reconvertește toate zilele.
-2. **load**: reconstruiește `bronze.cowrie_events` în `warehouse.duckdb` din toate fișierele Parquet (`union_by_name`, pentru că zilele pot avea coloane diferite).
-3. **validate**: deocamdată doar un placeholder.
-
-### 3. dbt
+**Exploration:**
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install dbt-duckdb
-
-cd dbt_project
-dbt build --profiles-dir .     # rulează modelele și testele
+duckdb warehouse.duckdb -ui    # UI at http://localhost:4213
 ```
 
-Implicit, dbt scrie în `../warehouse.duckdb`; se poate schimba cu variabila `DUCKDB_PATH`.
+What each task does, the DAG parameters, how to run dbt by hand and known issues: [docs/documentation.md](docs/documentation.md#operations).
 
-`dbt build` rulează 74 de teste:
+## Status and next steps
 
-- **unicitate și not null** pe cheile surogat și naturale ale fiecărei dimensiuni și pe cheile primare ale tabelelor de fapte;
-- **integritate referențială** (`relationships`): fiecare FK din `fct_events` și `fct_sessions` există în dimensiunea lui;
-- **reconciliere** (`dbt_project/tests/`): `fct_events` are câte rânduri are staging-ul, iar totalurile din `fct_sessions`, `dim_attacker` și `campaigns` se potrivesc cu tabelele din care sunt construite;
-- **reguli de business**: cheile opționale apar doar pe tipurile de evenimente potrivite, o sesiune cu login reușit are credențiale, o campanie are cel puțin `campaign_min_ips` IP-uri.
-
-> DuckDB permite un singur proces care scrie în fișier. Închide orice client deschis pe `warehouse.duckdb` (CLI, UI, DBeaver) înainte de `dbt build` sau de task-ul `load`.
-
-### 4. Explorare
-
-```bash
-duckdb warehouse.duckdb -ui    # UI la http://localhost:4213
-```
-
-În notebook-urile din UI, scrie numele complet al tabelelor (`warehouse.gold.fct_events`) sau rulează `use warehouse;` la început. Altfel celula poate rula pe baza in-memory și dă `Catalog "..." does not exist`.
-
-## Status și pașii următori
-
-- [x] Honeypot Cowrie în Docker
-- [x] Upload zilnic al logurilor în S3 (raw)
+- [x] Cowrie honeypot in Docker
+- [x] Daily log upload to S3 (raw)
 - [x] Airflow: raw → bronze (Parquet) → DuckDB
-- [x] dbt staging (silver) cu teste
-- [x] dbt galaxy schema (gold): `fct_events` + `fct_sessions` + 6 dimensiuni comune
-- [x] Detectarea campaniilor (`campaigns`) după secvența de comenzi + HASSH
-- [x] Teste de reconciliere între tabelele gold
-- [ ] `dbt build` ca task în DAG, în locul placeholder-ului `validate`
-- [ ] Îmbogățire IP-uri: țară, ASN (geo-IP)
-- [ ] Clasificarea comenzilor (recon, persistence, download, mining)
-- [ ] Dashboard peste stratul gold
+- [x] dbt staging (silver) with tests
+- [x] dbt galaxy schema (gold): `fct_events` + `fct_sessions` + 6 shared dimensions
+- [x] Campaign detection (`campaigns`) by command sequence + HASSH
+- [x] Reconciliation tests between gold tables
+- [x] dbt in the DAG: transform_staging → transform_marts → validate → dbt_docs_generate
+- [ ] IP enrichment: country, ASN (geo-IP)
+- [ ] Command classification (recon, persistence, download, mining)
+- [ ] Dashboard on top of the gold layer

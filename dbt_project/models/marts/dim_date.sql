@@ -15,7 +15,7 @@ select
     month(date_day) as month,
     monthname(date_day) as month_name,
     weekofyear(date_day) as iso_week,
-    isodow(date_day) as day_of_week,       -- 1 = luni, 7 = duminica
+    isodow(date_day) as day_of_week,-- 1 = luni, 7 = duminica
     dayname(date_day) as day_name,
     isodow(date_day) in (6, 7) as is_weekend
 from days

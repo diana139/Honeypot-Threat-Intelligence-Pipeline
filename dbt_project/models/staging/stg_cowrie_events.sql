@@ -13,10 +13,9 @@ staged as (
         "timestamp" as event_ts,
         dt as event_date,
 
-        eventid as event_type,         
-        replace(eventid, 'cowrie.', '') as event_name,         
+        eventid as event_type,
+
         -- rețea: src = atacatorul, dst = honeypot-ul
-        -- (pe evenimentele direct-tcpip.*, dst e destinatia tunelului, vezi mai jos)
         protocol,
         src_ip,
         src_port,
@@ -58,7 +57,7 @@ staged as (
         -- direct-tcpip: atacatorul foloseste honeypot-ul ca proxy catre dst_ip:dst_port
         case when eventid like 'cowrie.direct-tcpip.%' then dst_ip end as tunnel_dst_ip,
         case when eventid like 'cowrie.direct-tcpip.%' then dst_port end as tunnel_dst_port,
-        orig_ip as tunnel_orig_ip,         -- originea declarata de client (de obicei 0.0.0.0 / 127.0.0.1)
+        orig_ip as tunnel_orig_ip, -- originea declarata de client (de obicei 0.0.0.0 / 127.0.0.1)
         orig_port as tunnel_orig_port,
         "data" as tunnel_data,
         ja4,

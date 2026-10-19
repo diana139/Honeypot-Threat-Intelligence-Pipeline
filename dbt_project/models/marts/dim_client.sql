@@ -1,5 +1,5 @@
--- clientul SSH al atacatorului: versiunea (din client.version) + fingerprint-ul hassh (din client.kex).
--- Fiecare sesiune are cel mult o versiune si un hassh, deci clientul se stabileste la nivel de sesiune.
+-- clientul SSH al atacatorului: versiunea (din client.version) + fingerprint-ul hassh (din client.kex)
+-- Fiecare sesiune are cel mult o versiune si un hassh, deci clientul se stabileste la nivel de sesiune
 with sessions as (
     select
         session_id,

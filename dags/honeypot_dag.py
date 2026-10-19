@@ -1,5 +1,6 @@
 import os
 import logging
+import subprocess
 from datetime import timedelta
 from pathlib import Path
 import pendulum
@@ -17,6 +18,24 @@ RAW_PREFIX = "raw/"                       # zona raw a lake-ului: json.gz exact 
 BRONZE_PREFIX = "bronze/cowrie_events/"   # zona bronze a lake-ului: Parquet partitionat pe dt
 AWS_CONN_ID = "aws_default"
 DUCKDB_PATH = os.environ.get("DUCKDB_PATH", str(PROJECT_DIR / "warehouse.duckdb"))
+DBT_DIR = PROJECT_DIR / "dbt_project"
+DBT_BIN = os.environ.get("DBT_BIN", "dbt")   # in imagine, dbt e in venv-ul lui separat (vezi Dockerfile)
+
+def run_dbt(*command, min_ips=None):
+    """Ruleaza o comanda dbt pe proiectul din dbt_project/; pica task-ul daca dbt pica."""
+    full_command = [DBT_BIN, *command, "--project-dir", str(DBT_DIR), "--profiles-dir", str(DBT_DIR)]
+    if min_ips is not None:
+        full_command += ["--vars", f"{{campaign_min_ips: {min_ips}}}"]
+    log.info(f"DBT: {' '.join(full_command)}")
+
+    # DUCKDB_PATH ajunge la dbt din mediul task-ului
+    result = subprocess.run(full_command, capture_output=True, text=True)
+    log.info(result.stdout)
+    if result.stderr:
+        log.info(result.stderr)
+    if result.returncode != 0:
+        raise RuntimeError(f"dbt {' '.join(command)} a picat cu exit code {result.returncode}")
+
 
 def list_days(hook, prefix):
     """Zilele (dt=YYYY-MM-DD) care exista sub un prefix din S3."""
@@ -55,6 +74,8 @@ def connect_s3(hook, path=":memory:"):
     params={
         # true = reconverteste toate zilele din raw/ in Parquet (de ex. dupa ce se schimba logica din convert)
         "full_refresh": Param(False, type="boolean"),
+        # de pe cate IP-uri diferite trebuie vazut un script ca sa fie considerat campanie
+        "campaign_min_ips": Param(10, type="integer", minimum=2),
     },
     tags=["honeypot"],
 )
@@ -115,11 +136,27 @@ def honeypot_dag():
         con.close()
 
     @task()
-    def validate():
-        log.info("Validating data...")
+    def transform_staging():
+        """bronze -> silver: stg_cowrie_events."""
+        run_dbt("run", "--select", "staging")
+
+    @task()
+    def transform_marts(**context):
+        """silver -> gold: dimensiunile, fct_events, fct_sessions, campaigns."""
+        run_dbt("run", "--select", "marts", min_ips=context["params"]["campaign_min_ips"])
+
+    @task()
+    def validate(**context):
+        """Toate testele dbt (staging, gold si reconcilierile din dbt_project/tests/)."""
+        run_dbt("test", min_ips=context["params"]["campaign_min_ips"])
+
+    @task()
+    def dbt_docs_generate():
+        """Documentatia dbt (target/index.html), vizibila cu `dbt docs serve`."""
+        run_dbt("docs", "generate")
 
 
-    convert() >> load() >> validate()
+    convert() >> load() >> transform_staging() >> transform_marts() >> validate() >> dbt_docs_generate()
 
 
 

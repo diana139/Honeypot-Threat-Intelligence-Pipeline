@@ -45,8 +45,8 @@ select
     s.attacker_key,
     s.client_key,
     s.credential_key,
-    -- semnatura campaniei: aceeasi unealta (hassh) + acelasi script (secventa de comenzi).
-    -- Doar semnaturile vazute de pe destule IP-uri ajung in campaigns.
+    -- semnatura campaniei: aceeasi unealta (hassh) + acelasi script (secventa de comenzi)
+    -- Doar semnaturile vazute de pe destule IP-uri ajung in campaigns
     case when s.command_sequence_hash is not null
         then md5(concat_ws('|', coalesce(c.hassh, '<null>'), s.command_sequence_hash))
     end as campaign_key,
