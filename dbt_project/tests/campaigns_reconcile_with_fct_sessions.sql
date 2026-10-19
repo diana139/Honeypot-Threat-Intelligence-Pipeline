@@ -1,4 +1,4 @@
--- numarul de sesiuni si de IP-uri din campaigns trebuie sa se regaseasca in fct_sessions
+-- the sessions and IPs counted in campaigns must match fct_sessions
 with expected as (
     select
         campaign_key,

@@ -1,4 +1,4 @@
--- dim_date e generata din min/max event_date, deci trebuie sa fie continua (fara zile lipsa)
+-- dim_date is generated from min/max event_date, so it must be continuous (no missing days)
 with bounds as (
     select
         count(*) as days,

@@ -54,7 +54,7 @@ models:
               config:
                 severity: warn
 
-      # coloane obligatorii doar pentru anumite tipuri de evenimente
+      # columns required only on some event types
       - name: username
         data_tests:
           - not_null:

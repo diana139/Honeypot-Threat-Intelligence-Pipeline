@@ -20,6 +20,8 @@ x-airflow-common: &airflow-common
     DUCKDB_PATH: /opt/airflow/project/warehouse.duckdb
     HONEYPOT_BUCKET: ${HONEYPOT_BUCKET:-sundew-honeypot-diana}
     DBT_BIN: /home/airflow/dbt-venv/bin/dbt
+    PYTHONPATH: /opt/airflow/project   # so the DAG can import enrichment/
+    IPINFO_TOKEN: ${IPINFO_TOKEN:-}
   volumes:
     - .:/opt/airflow/project
     - ./logs:/opt/airflow/logs

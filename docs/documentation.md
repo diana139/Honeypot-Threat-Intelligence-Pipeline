@@ -4,7 +4,7 @@ Technical documentation of the project. For the overview and results, see the [R
 
 - [Architecture](#architecture): the components, the S3 bucket, the IAM users, the sensor
 - [Data model](#data-model): the bronze, silver and gold layers, columns, campaigns, tests, useful queries
-- [Operations](#operations): Airflow, dbt, exploration, known issues
+- [Operations](#operations): Airflow, IP enrichment, dbt, exploration, known issues
 
 ## Architecture
 
@@ -18,11 +18,13 @@ The project has three components, each with its own AWS permissions:
 2. **The data lake**: the S3 bucket `sundew-honeypot-diana` (region `eu-north-1`), with the `raw/` and `bronze/` zones.
 3. **The analytics platform**: Airflow, DuckDB and dbt, running locally in Docker. They read from the lake, write the bronze layer back and build the warehouse.
 
+One external service sits outside AWS: the [IPinfo Lite](https://ipinfo.io/lite) API, which gives the country and network (ASN) of the attacker IPs. It is called by the analytics platform, with its own token (`IPINFO_TOKEN`).
+
 The sensor is not in AWS: the only AWS services the project uses are S3 and IAM.
 
 ```
             INTERNET (bots, scanners)
-                     │  SSH :2222 / Telnet :2223
+                     │  SSH :22 / Telnet :23
                      ▼
 ┌─────────────── SENSOR (Hetzner VPS) ─────────────────┐
 │  Cowrie (Docker, read-only, no capabilities)         │
@@ -42,13 +44,15 @@ The sensor is not in AWS: the only AWS services the project uses are S3 and IAM.
 ┌──────────── ANALYTICS PLATFORM (local, Docker) ──────┐
 │  Airflow ── convert ─────────────────────┘           │
 │     │       (DuckDB: JSON → Parquet, directly in S3) │
-│     ├── load ──► warehouse.duckdb                    │
+│     ├── load ──► warehouse.duckdb   (new days only)  │
 │     │             bronze.cowrie_events   (table)     │
 │     │                    │ dbt                       │
 │     │                    ▼                           │
 │     │             silver.stg_cowrie_events (view)    │
-│     │                    │ dbt                       │
-│     │                    ▼                           │
+│     │                    │                           │
+│     ├── enrich_ips ──► enrichment.ipinfo ◄───────────┼──── IPinfo Lite API
+│     │                    │ (new IPs only)            │     (country, ASN)
+│     │                    ▼ dbt                       │
 │     │             gold: fct_*, dim_*, campaigns      │
 │     └── validate (dbt test) ──► dbt docs             │
 └──────────────────────────────────────────────────────┘
@@ -61,6 +65,7 @@ The sensor is not in AWS: the only AWS services the project uses are S3 and IAM.
 | raw | S3 `raw/` | JSON lines, gzip | Cowrie logs exactly as the honeypot writes them, one day per file |
 | bronze | S3 `bronze/` + `bronze.cowrie_events` | Parquet (zstd) / DuckDB table | the same data, with automatically detected types |
 | silver | `silver.stg_cowrie_events` | dbt view | renamed columns, unique key per event, tested |
+| enrichment | `enrichment.ipinfo` | DuckDB table, written by Python | country and ASN per attacker IP, filled once per IP |
 | gold | `gold.fct_*`, `gold.dim_*`, `gold.campaigns` | dbt tables | dimensional model for analysis |
 
 Columns and modeling decisions for each layer: [Data model](#data-model).
@@ -83,7 +88,7 @@ s3://sundew-honeypot-diana/
 ```
 
 - **`raw/` is the source of truth.** It is never modified. The bucket has **versioning** enabled, so if a file is overwritten, the previous version stays in S3 and can be recovered. If the conversion logic changes, bronze is rebuilt from raw with `full_refresh=true`.
-- **Daily partitioning** makes loading incremental: `convert` compares the days in `raw/` with those in `bronze/` and only processes the new ones.
+- **Daily partitioning** makes loading incremental: `convert` compares the days in `raw/` with those in `bronze/` and only processes the new ones, and `load` only loads the days after the last one already in the warehouse.
 - **Nothing goes through local disk.** DuckDB reads `s3://.../raw/...json.gz` and writes Parquet directly to `s3://.../bronze/...`, through the `httpfs` extension.
 
 ### IAM users
@@ -157,7 +162,9 @@ cd /opt/honeypot
 docker compose up -d
 ```
 
-The Cowrie container runs with a read-only filesystem, without Linux capabilities (`cap_drop: ALL`) and with `no-new-privileges`. It listens on ports 2222 (SSH) and 2223 (Telnet). The server's real SSH has been moved to an unusual port, so it doesn't mix with the honeypot traffic. Logs go to `var/log/cowrie/` and are rotated daily (`cowrie.json.YYYY-MM-DD`).
+The Cowrie container runs with a read-only filesystem, without Linux capabilities (`cap_drop: ALL`) and with `no-new-privileges`. Inside the container it listens on 2222 (SSH) and 2223 (Telnet), and Docker publishes them on the standard ports **22** and **23**, where bots look for them. The `var/` folder belongs to uid 999, the user Cowrie runs as in the container. Logs go to `var/log/cowrie/` and are rotated daily (`cowrie.json.YYYY-MM-DD`).
+
+The server's real SSH has been moved to another port, so port 22 is free for Cowrie and admin traffic doesn't mix with the attacks. Ubuntu starts SSH through `ssh.socket`, so the port is set in `/etc/systemd/system/ssh.socket.d/override.conf` (`ListenStream=0.0.0.0:<SSH_PORT>`), not in `sshd_config`. You connect with `ssh -p <SSH_PORT> root@<SERVER_IP>`. The address and the port are deliberately not in the repo; the full setup, step by step, is in the [README](../README.md#how-to-run).
 
 The AWS CLI is configured for `root` with the `honeypot-sensor` keys. The upload runs from `root`'s crontab, daily at 01:00 (server time, UTC):
 
@@ -169,7 +176,7 @@ The AWS CLI is configured for `root` with the `honeypot-sensor` keys. The upload
 
 ## Data model
 
-Documentation of the layers in `warehouse.duckdb` and of the dimensional model. Figures are for the data from 2026-09-01 to 2026-10-11.
+Documentation of the layers in `warehouse.duckdb` and of the dimensional model. Figures are for the data from 2026-09-01 to 2026-10-11, except the enrichment figures, which are for the data up to 2026-10-18.
 
 ### Concepts
 
@@ -196,7 +203,7 @@ Commands are not actually executed: Cowrie simulates a Linux system and only rec
 
 ### Bronze: `bronze.cowrie_events`
 
-Loaded by the Airflow `load` task from `s3://<bucket>/bronze/cowrie_events/dt=*/events.parquet`. The table is fully rebuilt on every run.
+Loaded by the Airflow `load` task from `s3://<bucket>/bronze/cowrie_events/dt=*/events.parquet`. Only the days after the last day already in the table (`max(dt)`) are inserted; with `full_refresh=true`, or when the table doesn't exist yet, it is rebuilt from all files. See [DAG tasks](#dag-tasks).
 
 It is a "wide" and sparse table: it has a column (52 in total) for every field that appears in **any** event type, but each row only fills the columns relevant to its type. The rest are NULL.
 
@@ -237,6 +244,25 @@ On every row: `event_id`, `session_id`, `event_ts`, `event_date`, `event_type`, 
 - `protocol`: `accepted_values` (`ssh`, `telnet`)
 - `event_type`: `accepted_values` with the 23 known types, `severity: warn`, so a new Cowrie event type raises a warning without stopping the pipeline
 - `username` on `login.*`, `command_input` on `command.input`, `file_sha256` on `file_download`: conditional `not_null` (`where`)
+
+### Enrichment: `enrichment.ipinfo`
+
+Written by the `enrichment/` package (the `enrich_ips` task), not by dbt. One row = one attacker IP. dbt reads it as the source `enrichment.ipinfo` and joins it into `dim_attacker`.
+
+| Column | Description |
+|---|---|
+| `ip` | PK, the attacker IP (`src_ip`) |
+| `country_code`, `country`, `continent` | where the IP is located, e.g. `DE`, `Germany`, `Europe` |
+| `asn`, `as_name`, `as_domain` | the network the IP belongs to, e.g. `AS14061`, `DigitalOcean, LLC`, `digitalocean.com` |
+| `enriched_at` | when the IP was looked up |
+
+All 7,391 IPs (data up to 2026-10-18) are enriched: 142 countries and 1,988 networks.
+
+**Each IP is looked up only once.** The table is the cache: on every run, only IPs that appear in `silver.stg_cowrie_events` but not yet in `enrichment.ipinfo` are sent to the API, so daily runs only look up that day's new attackers. IPs the API doesn't know are saved with NULLs, so they aren't asked for again. Lookups that fail (timeout, server error) are not saved, so they are retried on the next run.
+
+**The data is not refreshed.** An IP can move to another network or country over time, but the honeypot cares about where it was when it attacked, and the attacks are recent. To refresh, delete rows from `enrichment.ipinfo` and the next run looks them up again.
+
+Tests (`models/staging/_sources.yml`): `ip` `unique` + `not_null`.
 
 ### Gold: galaxy schema
 
@@ -336,6 +362,12 @@ erDiagram
         bigint successful_logins
         bigint commands
         bigint downloads
+        varchar country_code "from enrichment.ipinfo"
+        varchar country
+        varchar continent
+        varchar asn
+        varchar as_name
+        varchar as_domain
     }
 
     dim_client {
@@ -421,7 +453,7 @@ One row = one event (2,097,515 rows).
 |---|---|---|---|
 | `dim_date` | date | 41 | `date_day`, `year`, `month`, `month_name`, `iso_week`, `day_of_week` (1 = Monday), `day_name`, `is_weekend` |
 | `dim_event_type` | `event_type` | 23 | `event_category`: the second part of `event_type` (`cowrie.login.success` → `login`); one of `session`, `client`, `login`, `command`, `log`, `direct-tcpip` |
-| `dim_attacker` | `src_ip` | 6,739 | `first_seen_at`, `last_seen_at`, `active_days`, `sessions`, `events`, `successful_logins`, `commands`, `downloads` |
+| `dim_attacker` | `src_ip` | 6,739 | `first_seen_at`, `last_seen_at`, `active_days`, `sessions`, `events`, `successful_logins`, `commands`, `downloads`; from the [enrichment](#enrichment-enrichmentipinfo): `country_code`, `country`, `continent`, `asn`, `as_name`, `as_domain` (NULL until the IP is enriched) |
 | `dim_client` | `client_version` + `hassh` | 627 | `hassh_algorithms`, `first_seen_at`, `last_seen_at`, `sessions` |
 | `dim_credential` | `username` + `password` | 85,238 | `first_seen_at`, `attempts`, `successes` |
 | `dim_file` | `file_sha256` | 92 | `first_seen_at`, `last_seen_at`, `downloads`, `uploads`, `distinct_urls`, `first_url` |
@@ -443,6 +475,8 @@ One row = one event (2,097,515 rows).
 **Credentials are a dimension of their own**, not degenerate attributes in the fact, because a username/password pair has useful computed attributes (number of attempts, how many succeeded, first seen).
 
 **The command is a degenerate attribute in the fact.** `command_input` lives directly in `fct_events`: the command text has no other descriptive attributes, and the statistics (how many times it ran, by how many attackers) come from `group by command_input`. A `dim_command` would make sense once command classification is added (recon, persistence, download, mining).
+
+**Geo-IP as attributes of `dim_attacker`, not a separate dimension.** Country and ASN describe the IP, and each IP has exactly one country and one network, so they belong in the IP's dimension. A `dim_network` (one row per ASN) would only be worth it if networks got attributes of their own. The join is a `left join`, so an IP that hasn't been enriched yet still appears, with NULLs.
 
 **No sensor dimension.** There is a single honeypot. Cowrie's `sensor_name` is the Docker container's hostname, i.e. its ID, and it changed when the container was recreated (2026-09-02, 16:40), even though `sensor_uuid` stayed the same. A `dim_sensor` would have had two rows for the same sensor. It can be added once there are several honeypots, keyed on `sensor_uuid` and with attributes such as region or provider. `sensor_name` remains available in `silver.stg_cowrie_events`.
 
@@ -507,7 +541,7 @@ dbt build --select campaigns --vars '{campaign_min_ips: 20}' --profiles-dir .
 
 ### Gold tests
 
-`dbt build` runs 64 tests in total (staging + gold).
+`dbt build` runs 66 tests in total (staging, the enrichment source and gold).
 
 #### Generic tests (`models/marts/schema.yml`)
 
@@ -532,7 +566,7 @@ dbt build --select campaigns --vars '{campaign_min_ips: 20}' --profiles-dir .
 
 ### Useful queries
 
-Ready-to-run queries live in `analysis/queries/`, one file per question: largest campaigns, the IPs of a campaign, most tried credentials, most run commands, downloaded files, sessions over time, activity by category, proxy destinations and SSH tools. The list with the question each one answers is in the [README](../README.md#what-you-can-do-with-the-data).
+Ready-to-run queries live in `analysis/queries/`, one file per question: largest campaigns, the IPs of a campaign, most tried credentials, most run commands, downloaded files, sessions over time, activity by category, proxy destinations, SSH tools, countries and networks. The list with the question each one answers is in the [README](../README.md#what-you-can-do-with-the-data).
 
 ```bash
 duckdb -readonly warehouse.duckdb -f analysis/queries/04_top_commands.sql
@@ -547,26 +581,31 @@ How to run the pipeline, what each task does and what to do when something break
 ### Airflow
 
 ```bash
-cp .env.example .env        # fill in AIRFLOW_JWT_SECRET and AIRFLOW_API_SECRET_KEY
+cp .env.example .env        # fill in AIRFLOW_JWT_SECRET, AIRFLOW_API_SECRET_KEY and IPINFO_TOKEN
 docker compose up -d
 ```
 
-The Airflow UI is at http://localhost:8085. AWS credentials (the `honeypot-analyst` user) are read from `~/.aws`, mounted read-only into the containers. dbt runs from its own separate venv in the image (`DBT_BIN`), because in Airflow 3 its dependencies conflict with Airflow's.
+The Airflow UI is at http://localhost:8085. Docker Compose reads `.env` and passes `IPINFO_TOKEN` to the containers; after changing it, run `docker compose up -d` again. `PYTHONPATH` points to the project root, so the DAG can import the `enrichment` package. AWS credentials (the `honeypot-analyst` user) are read from `~/.aws`, mounted read-only into the containers. dbt runs from its own separate venv in the image (`DBT_BIN`), because in Airflow 3 its dependencies conflict with Airflow's.
 
 #### DAG tasks
 
 The `honeypot_dag` DAG runs daily at 04:00 UTC:
 
 ```
-convert → load → transform_staging → transform_marts → validate → dbt_docs_generate
+convert → load → transform_staging → enrich_ips → transform_marts → validate → dbt_docs_generate
 ```
 
 1. **convert**: for every day in `raw/` that doesn't exist in `bronze/` yet, DuckDB reads the JSON directly from S3 and writes Parquet back to S3.
-2. **load**: rebuilds `bronze.cowrie_events` in `warehouse.duckdb` from all Parquet files (`union_by_name`, because days can have different columns).
+2. **load**: takes the last day already in `bronze.cowrie_events` (`max(dt)`, the watermark), lists the days in `bronze/` and inserts only the ones after it, with `INSERT ... BY NAME`. A single `INSERT` is atomic: either all new days go in, or none. If the table doesn't exist yet, or with `full_refresh=true`, it rebuilds the table from all Parquet files.
 3. **transform_staging**: `dbt run --select staging` (bronze → silver).
-4. **transform_marts**: `dbt run --select marts` (silver → gold): the dimensions, `fct_events`, `fct_sessions` and `campaigns`.
-5. **validate**: `dbt test`, all 64 tests. If a test fails, the run shows up as failed in Airflow.
-6. **dbt_docs_generate**: the dbt documentation (`dbt docs serve --profiles-dir .` opens it in the browser).
+4. **enrich_ips**: looks up the new attacker IPs in IPinfo and saves them to `enrichment.ipinfo` (see [IP enrichment](#ip-enrichment)). It runs after staging because it takes the IPs from `silver.stg_cowrie_events`, and before marts because `dim_attacker` joins the result. Without `IPINFO_TOKEN` it logs a warning and the DAG continues.
+5. **transform_marts**: `dbt run --select marts` (silver → gold): the dimensions, `fct_events`, `fct_sessions` and `campaigns`.
+6. **validate**: `dbt test`, all 66 tests. If a test fails, the run shows up as failed in Airflow.
+7. **dbt_docs_generate**: the dbt documentation (`dbt docs serve --profiles-dir .` opens it in the browser).
+
+#### Why `union_by_name`
+
+Cowrie only writes the fields that exist on each event, so each day's Parquet file only has the columns of the events that happened that day: a day with no downloads has no `url` column. Without `union_by_name`, DuckDB takes the columns of the first file and silently drops the rest. On this data, the first day (2026-09-01) has 34 of the 52 columns, so 18 columns would be lost, including `url`, `fingerprint` and `ja4`. With `union_by_name = true`, DuckDB collects the columns of all files and matches them by name; a file without a column gets NULL there. `INSERT ... BY NAME` does the same when writing into the table: the columns are matched by name, not by position.
 
 #### Parameters
 
@@ -574,14 +613,42 @@ Set them from **Trigger DAG w/ config**:
 
 | Parameter | Default | What it does |
 |---|---|---|
-| `full_refresh` | `false` | `true` reconverts every day in `raw/` to Parquet, e.g. after the `convert` logic changes |
+| `full_refresh` | `false` | `true` reconverts every day in `raw/` to Parquet and rebuilds `bronze.cowrie_events` from all files, e.g. after the `convert` logic changes, or when an incremental `load` fails (see [Known issues](#known-issues)) |
 | `campaign_min_ips` | `10` | from how many different IPs a script must be seen to count as a campaign |
+
+### IP enrichment
+
+The `enrichment/` package adds external data about the attacker IPs. Each source is a class, so a new source doesn't change the existing code.
+
+| File | Class / function | Responsibility |
+|---|---|---|
+| `base.py` | `Enricher` (abstract) | what a source is: a `name`, the `fields` it returns and a `lookup(ip)` method. It provides `lookup_many()`, which runs the lookups in parallel (a thread pool) and handles errors, and `make_session()`, an HTTP session with retries on 429 and 5xx |
+| `ipinfo.py` | `IPInfoEnricher(Enricher)` | calls `https://api.ipinfo.io/lite/<ip>` with the token |
+| `store.py` | `EnrichmentStore` | the `enrichment.<source>` tables in DuckDB: creates the table from the source's `fields`, returns the IPs not yet enriched, saves the results. A context manager, so the connection is always closed |
+| `run.py` | `enrich()`, `ENRICHERS`, CLI | ties a source to the store and saves in batches of 500, so an interrupted run keeps what it already saved |
+
+Errors are handled differently depending on what they mean:
+
+- **invalid or missing token** (`401` / `403`, no `IPINFO_TOKEN`): `EnricherAuthError` stops the run at the first IP, instead of trying thousands of IPs that would all fail;
+- **IP not found** (`404`): saved with NULLs, so it isn't asked for again;
+- **any other error** (timeout, `5xx` after the retries): the IP is not saved and is retried on the next run.
+
+**Running by hand.** `run.py` reads `IPINFO_TOKEN` from `.env` by itself:
+
+```bash
+.venv/bin/python -m enrichment.run --limit 50      # only 50 IPs, for a test
+.venv/bin/python -m enrichment.run                 # all IPs not enriched yet
+```
+
+Then rebuild `dim_attacker` so the new columns show up: `dbt build --select dim_attacker --profiles-dir .` from `dbt_project/`.
+
+**Adding a source.** Write a subclass of `Enricher` with its `name`, `fields` and `lookup()`, and add it to `ENRICHERS` in `run.py`. The store creates its `enrichment.<name>` table, and the `enrich_ips` task runs it automatically. In dbt, declare it as a source in `_sources.yml` and join it where it is needed.
 
 ### Running dbt by hand
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install dbt-duckdb
+pip install -r requirements.txt     # dbt-duckdb, duckdb, requests, python-dotenv
 
 cd dbt_project
 dbt build --profiles-dir .     # runs the models and the tests
@@ -595,7 +662,7 @@ The campaign threshold is changed with the `campaign_min_ips` variable:
 dbt build --select campaigns --vars '{campaign_min_ips: 20}' --profiles-dir .
 ```
 
-`dbt build` runs 64 tests:
+`dbt build` runs 66 tests:
 
 - **uniqueness and not null** on the surrogate and natural keys of every dimension and on the primary keys of the fact tables;
 - **referential integrity** (`relationships`): every FK in `fct_events` and `fct_sessions` exists in its dimension;
@@ -621,3 +688,7 @@ Ready-made queries: [Useful queries](#useful-queries) (`analysis/queries/`) and 
 | `Could not set lock on file` on `dbt build` or in the DAG tasks | DuckDB allows only one process writing to the file | close any client open on `warehouse.duckdb` (CLI, UI, DBeaver) |
 | `Catalog "..." does not exist` in DuckDB UI notebooks | the cell runs against the in-memory database | use fully qualified table names (`warehouse.gold.fct_events`) or run `use warehouse;` first |
 | `honeypot_dag` doesn't show up in Airflow | the stack isn't running, or the open UI belongs to another project | `docker compose up -d` from the project root and open port **8085** |
+| `load` fails with a column that doesn't exist in `bronze.cowrie_events` | a new day has a column the table has never had (a new Cowrie event type or field) | trigger the DAG with `full_refresh=true`: the table is rebuilt with all columns |
+| a day in `bronze/` is never loaded | it was converted after a later day was already loaded, so it is before `max(dt)` | trigger the DAG with `full_refresh=true` |
+| `enrich_ips` logs `IPINFO_TOKEN is not set` and the geo columns are NULL | the token is missing from `.env`, or the containers were started before it was added | add `IPINFO_TOKEN` to `.env` and run `docker compose up -d` |
+| `IPinfo token is invalid or missing` | the token is wrong (for example a placeholder copied from an example) | copy it again from https://ipinfo.io/dashboard/token |

@@ -1,4 +1,4 @@
--- un rand = o sesiune (o conexiune a unui atacator)
+-- one row = one session (one connection from an attacker)
 with events as (
     select
         f.*,
@@ -22,15 +22,15 @@ sessions as (
         bool_or(event_type = 'cowrie.login.success') as login_success,
         arg_max(credential_key, event_ts) filter (where event_type = 'cowrie.login.success') as credential_key,
 
-        -- comenzi: lista lor in ordinea rularii = "reteta" sesiunii
+        -- commands: the list in the order they ran = the session's "recipe"
         count(*) filter (where event_type = 'cowrie.command.input') as commands,
         string_agg(command_input, ' ; ' order by event_ts) filter (where event_type = 'cowrie.command.input') as command_sequence,
-        -- aceeasi lista, cu cifrele si sirurile hex lungi inlocuite cu N,
-        -- ca scripturile care pun valori aleatoare (parole, nume de fisiere) sa dea acelasi hash
+        -- the same list, with digits and long hex strings replaced by N,
+        -- so scripts that use random values (passwords, file names) still get the same hash
         md5(string_agg(regexp_replace(command_input, '[0-9a-fA-F]{6,}|[0-9]+', 'N', 'g'), ' ; ' order by event_ts)
             filter (where event_type = 'cowrie.command.input')) as command_sequence_hash,
 
-        -- fisiere si tunel
+        -- files and tunnel
         count(*) filter (where event_type = 'cowrie.session.file_download') as downloads,
         count(*) filter (where event_type = 'cowrie.session.file_upload') as uploads,
         count(*) filter (where event_type = 'cowrie.direct-tcpip.request') as tunnel_requests,
@@ -45,8 +45,8 @@ select
     s.attacker_key,
     s.client_key,
     s.credential_key,
-    -- semnatura campaniei: aceeasi unealta (hassh) + acelasi script (secventa de comenzi)
-    -- Doar semnaturile vazute de pe destule IP-uri ajung in campaigns
+    -- campaign signature: the same tool (hassh) + the same script (command sequence)
+    -- Only signatures seen from enough IPs make it into campaigns
     case when s.command_sequence_hash is not null
         then md5(concat_ws('|', coalesce(c.hassh, '<null>'), s.command_sequence_hash))
     end as campaign_key,

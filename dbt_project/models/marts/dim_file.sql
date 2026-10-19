@@ -1,5 +1,5 @@
--- fisiere descarcate/urcate de atacatori.
--- Atentie: shasum apare si pe cowrie.log.closed, dar acolo e hash-ul ttylog-ului, nu un fisier al atacatorului.
+-- files downloaded/uploaded by attackers.
+-- Note: shasum also appears on cowrie.log.closed, but there it is the hash of the ttylog, not an attacker file.
 select
     md5(file_sha256) as file_key,
     file_sha256,

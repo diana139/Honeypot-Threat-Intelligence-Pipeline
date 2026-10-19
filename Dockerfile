@@ -9,6 +9,6 @@ RUN pip install --no-cache-dir \
     pyarrow \
     apache-airflow-providers-amazon
 
-# dbt într-un mediu separat (în Airflow 3 dependențele lui intră în conflict cu ale Airflow)
+# dbt in its own venv (in Airflow 3 its dependencies conflict with Airflow's)
 RUN python -m venv /home/airflow/dbt-venv \
  && /home/airflow/dbt-venv/bin/pip install --no-cache-dir dbt-duckdb==1.11.0 duckdb==1.5.5

@@ -25,19 +25,6 @@ Cowrie is a honeypot: a fake SSH/Telnet server, exposed to the internet, that si
 
 Every action becomes a JSON **event**, with a type (`eventid`) and a `session` that links all events of the same connection.
 
-### Period and volume
-
-| | |
-|---|---|
-| Period | 2026-09-01 – 2026-10-11 (41 days) |
-| Events | 2,097,515 |
-| Sessions (connections) | 275,392 |
-| Attacking IPs | 6,739, of which 3,485 logged in successfully |
-| Distinct username/password pairs | 85,238 |
-| Distinct commands | 540 |
-| Distinct files downloaded/uploaded | 92 |
-| Distinct SSH clients (version + HASSH) | 627 |
-| Busiest day | 2026-10-05 (23,596 sessions) |
 
 ### What a typical session looks like
 
@@ -66,6 +53,8 @@ connect ──► client.version / client.kex ──► login.success / login.fa
 - **The credentials tried** are default or weak ones: `0/0`, `ubuntu/123456`, `ubuntu/ubuntu`, `admin/admin`, `root/12345678`. The pair `345gs5662d34/345gs5662d34` (1,650 attempts) is the signature of a known botnet.
 - **Persistence through SSH keys.** The most widespread campaign deletes `~/.ssh` and writes the attacker's public key into `authorized_keys`, so it can come back without a password (see [Campaigns](#campaigns)).
 - **The honeypot is used as a proxy.** 7,471 sessions opened `direct-tcpip` tunnels, most of them to Google IPs on port 80. Attackers check that the proxy works before using it.
+- **Attacks come from the cloud, not from home computers.** Every attacker IP is enriched with its country and network (ASN) from [IPinfo Lite](https://ipinfo.io/lite). Up to 2026-10-18, the 7,391 IPs come from 142 countries and 1,988 networks, and the largest networks are hosting providers: Google Cloud (287 IPs), DigitalOcean (217), Microsoft Azure (196). The United States (1,116 IPs) and China (874) have the most attackers, but Germany has the most sessions (167,573 from 336 IPs).
+- **One campaign, one hosting provider.** Almost all of those sessions come from 142 IPs of a single provider, BANATSYNC SRL (AS198364, in Germany and the Netherlands), all running the same `uname -s -v -n -r -m` script: 149,674 sessions, half of all sessions. The ASN confirms what the campaign detection suggested: those IPs belong to one operator.
 
 ## Architecture
 
@@ -73,14 +62,16 @@ connect ──► client.version / client.kex ──► login.success / login.fa
  ┌── Hetzner VPS ──┐  cron   ┌──────────── S3 ────────────┐  Airflow  ┌──────── warehouse.duckdb ────────┐
  │ Cowrie          │ ──────► │ raw/    (json.gz, per day) │ ────────► │ bronze → silver → gold (dbt)     │
  │ SSH honeypot    │         │ bronze/ (Parquet, per day) │ ◄──────── │ fct_*, dim_*, campaigns          │
- └─────────────────┘         └────────────────────────────┘  DuckDB   └──────────────────────────────────┘
+ └─────────────────┘         └────────────────────────────┘  DuckDB   │ enrichment.ipinfo ◄── IPinfo API │
+                                                                      └──────────────────────────────────┘
   honeypot-sensor                                            honeypot-analyst
   (write-only to raw/)                                       (reads the lake, writes bronze/)
 ```
 
 - **The sensor** is a Hetzner VPS running Cowrie, which uploads each day's logs to S3 every night.
 - **The data lake** is a versioned S3 bucket with a `raw/` zone (untouched logs) and a `bronze/` zone (Parquet), both partitioned by day.
-- **The analytics platform** (Airflow, DuckDB and dbt, running locally in Docker) converts raw → bronze directly in S3 and builds the warehouse in layers: bronze → silver → gold.
+- **The analytics platform** (Airflow, DuckDB and dbt, running locally in Docker) converts raw → bronze directly in S3 and builds the warehouse in layers: bronze → silver → gold. Conversion and loading are incremental: only new days are processed.
+- **Enrichment:** every new attacker IP is looked up once in the [IPinfo Lite](https://ipinfo.io/lite) API (country and ASN), and the result is cached in the warehouse.
 - **Security:** each component has its own IAM user with minimal permissions. The keys on the sensor, the most exposed machine, can only upload files to `raw/`: they cannot read, list or delete anything.
 
 Full diagram, bucket layout, IAM policies and server setup: [docs/documentation.md](docs/documentation.md#architecture).
@@ -129,6 +120,8 @@ Each dimension has a surrogate key (`md5` of the natural key), so the same keys 
 | `dim_file` | one downloaded/uploaded file | SHA256 | 92 |
 
 The keys `client_key`, `credential_key` and `file_key` are NULL on events unrelated to that dimension (for example, a `session.connect` has no credentials).
+
+`dim_attacker` also carries the country and network of each IP (`country_code`, `country`, `continent`, `asn`, `as_name`, `as_domain`), joined from the enrichment table.
 
 ### `campaigns`
 
@@ -200,6 +193,8 @@ Each question below is a ready-to-run query in [`analysis/queries/`](analysis/qu
 | What kind of activity happens each day? | [`07_activity_by_category.sql`](analysis/queries/07_activity_by_category.sql) |
 | Who uses the honeypot as a proxy, and to reach what? | [`08_proxy_destinations.sql`](analysis/queries/08_proxy_destinations.sql) |
 | Which SSH tools do attackers use? | [`09_ssh_tools.sql`](analysis/queries/09_ssh_tools.sql) |
+| Which countries do the attacks come from? | [`10_attackers_by_country.sql`](analysis/queries/10_attackers_by_country.sql) |
+| Which networks (hosting providers, ISPs) do they come from? | [`11_attacker_networks.sql`](analysis/queries/11_attacker_networks.sql) |
 
 Run one from the project root:
 
@@ -213,10 +208,10 @@ Or open them in the DuckDB UI (`duckdb warehouse.duckdb -ui`) and run them there
 
 | Idea | What it adds | How |
 |---|---|---|
-| **Geo-IP and ASN** | which countries and which hosting providers the attacks come from | a weekly Airflow task downloads [IPinfo Lite](https://ipinfo.io/lite) (country + ASN, free) into DuckDB; a dbt model turns its CIDR networks into numeric IP ranges, and `dim_attacker` gets `country_code`, `country`, `asn`, `as_name` through a range join |
 | **Command classification** | what attackers are after: reconnaissance, persistence, download, mining | a `dim_command` with text rules, mapped to [MITRE ATT&CK](https://attack.mitre.org) tactics |
 | **Blocklist** | a daily exported list of IPs to block | IPs of campaigns active in the last N days, written to S3 by an Airflow task |
 | **New-campaign alert** | know when a new script shows up | a dbt test or a task that compares `campaigns` with the previous day |
+| **More IP sources** | whether an IP is already reported for abuse, and since when | a new `Enricher` subclass for [AbuseIPDB](https://www.abuseipdb.com), added to `enrichment/` |
 | **File enrichment** | the malware family (Mirai, XMRig, ...) | SHA256 lookup in the VirusTotal or MalwareBazaar API |
 | **Dashboard** | visualization for people who don't write SQL | Evidence, Metabase or Superset on top of `gold` |
 
@@ -227,6 +222,7 @@ Or open them in the DuckDB UI (`duckdb warehouse.duckdb -ui`) and run them there
 - **Apache Airflow 3.3**: orchestration (`dags/honeypot_dag.py`)
 - **DuckDB 1.5**: JSON → Parquet conversion directly in S3, and the local data warehouse
 - **dbt (dbt-duckdb)**: transformations, tests and the dimensional model (`dbt_project/`)
+- **IPinfo Lite**: country and ASN of the attacker IPs, through a small Python package (`enrichment/`)
 - **Docker Compose**: Airflow + Postgres (Airflow metadata)
 
 ## Project structure
@@ -235,7 +231,12 @@ Or open them in the DuckDB UI (`duckdb warehouse.duckdb -ui`) and run them there
 .
 ├── infra/honeypot/docker-compose.yml   # the Cowrie container
 ├── ingest/upload_logs.sh               # uploads the daily Cowrie logs to S3 (raw/)
-├── dags/honeypot_dag.py                # Airflow DAG: convert → load → staging → marts → validate → docs
+├── dags/honeypot_dag.py                # Airflow DAG: convert → load → staging → enrich → marts → validate → docs
+├── enrichment/                         # IP enrichment (country, ASN): one class per source
+│   ├── base.py                         # Enricher: the abstract source, parallel lookups
+│   ├── ipinfo.py                       # IPInfoEnricher: the IPinfo Lite API
+│   ├── store.py                        # EnrichmentStore: the enrichment.* tables in DuckDB
+│   └── run.py                          # runs the enrichment (python -m enrichment.run)
 ├── dbt_project/
 │   ├── dbt_project.yml
 │   ├── profiles.yml                    # DuckDB connection (DUCKDB_PATH)
@@ -250,40 +251,85 @@ Or open them in the DuckDB UI (`duckdb warehouse.duckdb -ui`) and run them there
 ├── docs/documentation.md               # technical docs: architecture, data model, operations
 ├── Dockerfile                          # Airflow image (+ dbt in a separate venv)
 ├── docker-compose.yml                  # Airflow + Postgres
+├── requirements.txt                    # local venv: dbt and the enrichment, outside Airflow
+├── ruff.toml                           # Python linter settings
+├── .github/workflows/ci.yml            # CI: ruff + dbt parse on every push
 └── .env.example
 ```
 
 ## How to run
 
-**The sensor** (on the server): Cowrie in Docker and a cron job that uploads the logs to S3. The steps are in [docs/documentation.md](docs/documentation.md#the-sensor).
+You'll need an AWS account, a small Linux VPS for the sensor (I use Hetzner with Ubuntu), Docker and a free [IPinfo](https://ipinfo.io/signup) token. Replace `<BUCKET>`, `<SERVER_IP>` and `<SSH_PORT>` with your own values.
 
-**The pipeline** (locally):
+### AWS
 
-```bash
-cp .env.example .env        # fill in AIRFLOW_JWT_SECRET and AIRFLOW_API_SECRET_KEY
-docker compose up -d        # Airflow at http://localhost:8085
-```
-
-The `honeypot_dag` DAG runs daily at 04:00 UTC: `convert → load → transform_staging → transform_marts → validate → dbt_docs_generate`. AWS credentials are read from `~/.aws`.
-
-**Exploration:**
+Create a versioned bucket and the two IAM users. The policies are in [docs](docs/documentation.md#policies), saved here as `sensor-policy.json` and `analyst-policy.json`.
 
 ```bash
-duckdb warehouse.duckdb -ui    # UI at http://localhost:4213
+aws s3api create-bucket --bucket <BUCKET> --region eu-north-1 \
+    --create-bucket-configuration LocationConstraint=eu-north-1
+aws s3api put-bucket-versioning --bucket <BUCKET> --versioning-configuration Status=Enabled
+
+for user in sensor analyst; do
+    aws iam create-user --user-name honeypot-$user
+    aws iam put-user-policy --user-name honeypot-$user --policy-name $user-s3 \
+        --policy-document file://$user-policy.json
+    aws iam create-access-key --user-name honeypot-$user
+done
 ```
 
-What each task does, the DAG parameters, how to run dbt by hand and known issues: [docs/documentation.md](docs/documentation.md#operations).
+The sensor keys go on the server, the analyst keys on your machine.
 
-## Status and next steps
+### Sensor
 
-- [x] Cowrie honeypot in Docker
-- [x] Daily log upload to S3 (raw)
-- [x] Airflow: raw → bronze (Parquet) → DuckDB
-- [x] dbt staging (silver) with tests
-- [x] dbt galaxy schema (gold): `fct_events` + `fct_sessions` + 6 shared dimensions
-- [x] Campaign detection (`campaigns`) by command sequence + HASSH
-- [x] Reconciliation tests between gold tables
-- [x] dbt in the DAG: transform_staging → transform_marts → validate → dbt_docs_generate
-- [ ] IP enrichment: country, ASN (geo-IP)
-- [ ] Command classification (recon, persistence, download, mining)
+Cowrie needs port 22, so move the real SSH somewhere else first. On recent Ubuntu, SSH is started by `ssh.socket`:
+
+```bash
+ssh root@<SERVER_IP>
+
+mkdir -p /etc/systemd/system/ssh.socket.d
+printf '[Socket]\nListenStream=\nListenStream=0.0.0.0:<SSH_PORT>\nListenStream=[::]:<SSH_PORT>\n' \
+    > /etc/systemd/system/ssh.socket.d/override.conf
+systemctl daemon-reload && systemctl restart ssh.socket
+```
+
+Test `ssh -p <SSH_PORT> root@<SERVER_IP>` from another terminal before closing the first one.
+
+Then install Docker and the AWS CLI, run `aws configure` with the sensor keys, and copy the two files over (set `BUCKET` in `upload_logs.sh`):
+
+```bash
+scp -P <SSH_PORT> infra/honeypot/docker-compose.yml ingest/upload_logs.sh root@<SERVER_IP>:/opt/honeypot/
+```
+
+On the server:
+
+```bash
+cd /opt/honeypot
+mkdir -p var/log/cowrie var/lib/cowrie && chown -R 999:999 var   # Cowrie runs as uid 999
+docker compose up -d
+(crontab -l 2>/dev/null; echo '0 1 * * * /opt/honeypot/upload_logs.sh >> /var/log/honeypot-upload.log 2>&1') | crontab -
+```
+
+Logs are uploaded every night at 01:00 UTC. More in [docs](docs/documentation.md#the-sensor).
+
+### Pipeline
+
+Run `aws configure` with the analyst keys, then:
+
+```bash
+cp .env.example .env    # Airflow secrets (openssl rand -hex 32), bucket name, IPINFO_TOKEN
+docker compose up -d
+```
+
+Airflow is at http://localhost:8085. Unpause `honeypot_dag` and trigger it once; after that it runs every day at 04:00 UTC. Without `IPINFO_TOKEN` everything still works, the geo columns just stay empty.
+
+To look at the data:
+
+```bash
+duckdb -readonly warehouse.duckdb -f analysis/queries/01_top_campaigns.sql
+duckdb warehouse.duckdb -ui
+```
+
+Close the UI before the DAG runs, DuckDB only allows one writer. Running dbt or the enrichment by hand, DAG parameters and known issues are in [docs](docs/documentation.md#operations).
+
 - [ ] Dashboard on top of the gold layer

@@ -1,4 +1,4 @@
--- perechi username/password incercate la login (password poate lipsi la login.failed)
+-- username/password pairs tried at login (password can be missing on login.failed)
 select
     md5(concat_ws('|', username, coalesce(password, '<null>'))) as credential_key,
     username,

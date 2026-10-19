@@ -19,7 +19,7 @@ models:
     columns:
       - name: attacker_key
         data_tests: [unique, not_null]
-      # cheia naturala: un rand per IP
+      # natural key: one row per IP
       - name: src_ip
         data_tests: [unique, not_null]
 
@@ -32,7 +32,7 @@ models:
     columns:
       - name: credential_key
         data_tests: [unique, not_null]
-      # password poate lipsi (login.failed fara parola), username nu
+      # password can be missing (login.failed without a password), username can't
       - name: username
         data_tests: [not_null]
 
@@ -68,7 +68,7 @@ models:
               arguments:
                 to: ref('dim_event_type')
                 field: event_type_key
-      # cheile de mai jos sunt NULL pe evenimentele care nu au legatura cu dimensiunea respectiva
+      # the keys below are NULL on events unrelated to that dimension
       - name: client_key
         data_tests:
           - relationships:
