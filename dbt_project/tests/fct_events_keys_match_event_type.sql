@@ -1,5 +1,5 @@
--- cheile optionale din fct_events trebuie sa fie completate exact pe tipurile de evenimente potrivite:
--- credential_key pe login.*, file_key doar pe file_download / file_upload
+-- the optional keys in fct_events must be filled on exactly the right event types:
+-- credential_key on login.*, file_key only on file_download / file_upload
 select
     f.event_id,
     t.event_type,

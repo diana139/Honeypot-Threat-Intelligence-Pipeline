@@ -1,5 +1,5 @@
--- fct_events trebuie sa aiba exact un rand per eveniment din staging:
--- un join gresit catre o dimensiune ar dubla randuri, un filtru gresit le-ar pierde
+-- fct_events must have exactly one row per staging event:
+-- a bad join to a dimension would duplicate rows, a bad filter would drop them
 with counts as (
     select
         (select count(*) from {{ ref('stg_cowrie_events') }}) as stg_rows,

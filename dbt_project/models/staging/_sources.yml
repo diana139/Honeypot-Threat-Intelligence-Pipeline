@@ -5,3 +5,11 @@ sources:
     schema: bronze
     tables:
       - name: cowrie_events
+  # written by enrichment/ (python -m enrichment.run or the enrich_ips task in the DAG)
+  - name: enrichment
+    schema: enrichment
+    tables:
+      - name: ipinfo
+        columns:
+          - name: ip
+            data_tests: [unique, not_null]

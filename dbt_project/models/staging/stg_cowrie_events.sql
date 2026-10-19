@@ -4,7 +4,7 @@ with source as (
 
 staged as (
     select
-        -- chei
+        -- keys
         md5(session || '|' || cast("timestamp" as varchar) || '|' || eventid) as event_id,
         session as session_id,
         uuid as sensor_uuid,
@@ -15,7 +15,7 @@ staged as (
 
         eventid as event_type,
 
-        -- rețea: src = atacatorul, dst = honeypot-ul
+        -- network: src = the attacker, dst = the honeypot
         protocol,
         src_ip,
         src_port,
@@ -32,7 +32,7 @@ staged as (
         "macCS" as mac_cs,
         "compCS" as comp_cs,
         "langCS" as lang_cs,
-        -- autentificare cu cheie publica (client.fingerprint)
+        -- public key authentication (client.fingerprint)
         fingerprint as ssh_key_fingerprint,
         "key" as ssh_public_key,
         "type" as ssh_key_type,
@@ -42,10 +42,10 @@ staged as (
         username,
         password,
 
-        -- comenzi
+        -- commands
         input as command_input,
 
-        -- fișiere
+        -- files
         url as download_url,
         shasum as file_sha256,
         outfile,
@@ -54,16 +54,16 @@ staged as (
         size as file_size_bytes,
         duplicate as is_duplicate_file,
 
-        -- direct-tcpip: atacatorul foloseste honeypot-ul ca proxy catre dst_ip:dst_port
+        -- direct-tcpip: the attacker uses the honeypot as a proxy to dst_ip:dst_port
         case when eventid like 'cowrie.direct-tcpip.%' then dst_ip end as tunnel_dst_ip,
         case when eventid like 'cowrie.direct-tcpip.%' then dst_port end as tunnel_dst_port,
-        orig_ip as tunnel_orig_ip, -- originea declarata de client (de obicei 0.0.0.0 / 127.0.0.1)
+        orig_ip as tunnel_orig_ip, -- the origin the client claims (usually 0.0.0.0 / 127.0.0.1)
         orig_port as tunnel_orig_port,
         "data" as tunnel_data,
         ja4,
         ja4h,
 
-        -- diverse
+        -- other
         duration_ms,
         message,
         ttylog,

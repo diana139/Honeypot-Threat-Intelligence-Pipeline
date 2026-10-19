@@ -1,5 +1,5 @@
--- fct_sessions agrega fct_events: fiecare sesiune din fct_events apare o data,
--- iar suma evenimentelor pe sesiuni e egala cu numarul de evenimente
+-- fct_sessions aggregates fct_events: every session in fct_events appears once,
+-- and the sum of events over sessions equals the number of events
 with counts as (
     select
         (select count(distinct session_id) from {{ ref('fct_events') }}) as fct_sessions_expected,

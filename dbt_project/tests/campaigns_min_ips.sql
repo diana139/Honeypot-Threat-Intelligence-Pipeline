@@ -1,4 +1,4 @@
--- o campanie inseamna acelasi script rulat de pe cel putin `campaign_min_ips` IP-uri diferite
+-- a campaign is the same script run from at least `campaign_min_ips` different IPs
 select
     campaign_key,
     attackers

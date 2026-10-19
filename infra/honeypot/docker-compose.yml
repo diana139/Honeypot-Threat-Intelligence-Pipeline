@@ -7,8 +7,8 @@ services:
     container_name: cowrie
     restart: unless-stopped
     ports:
-      - "2222:2222"
-      - "2223:2223"
+      - "22:2222"    # the real SSH runs on another port, see docs#the-sensor
+      - "23:2223"
     volumes:
       - cowrie-etc:/cowrie/cowrie-git/etc
       - ./var:/cowrie/cowrie-git/var

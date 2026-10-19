@@ -1,8 +1,8 @@
--- un rand = un eveniment Cowrie
+-- one row = one Cowrie event
 with events as (
     select
         *,
-        -- clientul SSH e o proprietate a sesiunii, asa ca il atribuim tuturor evenimentelor din ea
+        -- the SSH client belongs to the session, so it is set on all of the session's events
         max(client_version) over (partition by session_id) as session_client_version,
         max(hassh) over (partition by session_id) as session_hassh
     from {{ ref('stg_cowrie_events') }}
@@ -13,7 +13,7 @@ select
     session_id,
     event_ts,
 
-    -- chei catre dimensiuni
+    -- dimension keys
     cast(strftime(event_date, '%Y%m%d') as integer) as date_key,
     md5(src_ip) as attacker_key,
     md5(event_type) as event_type_key,
@@ -27,17 +27,17 @@ select
         then md5(file_sha256)
     end as file_key,
 
-    -- atribute degenerate (specifice evenimentului, fara dimensiune proprie)
+    -- degenerate attributes (specific to the event, no dimension of their own)
     command_input,
     download_url,
-    destfile,               -- unde a salvat atacatorul fisierul pe honeypot
-    ssh_key_fingerprint,    -- cheia publica folosita la autentificare
+    destfile,               -- where the attacker saved the file on the honeypot
+    ssh_key_fingerprint,    -- the public key used to authenticate
     tunnel_dst_ip,
     tunnel_dst_port,
-    tunnel_data,            -- cererea trimisa prin tunel (de obicei HTTP)
-    ja4,                    -- fingerprint TLS al traficului din tunel
-    ja4h,                   -- fingerprint HTTP al traficului din tunel
+    tunnel_data,            -- the request sent through the tunnel (usually HTTP)
+    ja4,                    -- TLS fingerprint of the tunnel traffic
+    ja4h,                   -- HTTP fingerprint of the tunnel traffic
 
-    -- masuri
+    -- measures
     duration_ms
 from events

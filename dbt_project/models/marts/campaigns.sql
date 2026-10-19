@@ -1,5 +1,5 @@
--- un rand = o campanie: acelasi script de comenzi rulat cu aceeasi unealta SSH (hassh)
--- de pe cel putin campaign_min_ips IP-uri diferite
+-- one row = one campaign: the same command script run with the same SSH tool (hassh)
+-- from at least campaign_min_ips different IPs
 with sessions as (
     select * from {{ ref('fct_sessions') }}
     where campaign_key is not null
