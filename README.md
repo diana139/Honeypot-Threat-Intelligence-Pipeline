@@ -263,20 +263,7 @@ You'll need an AWS account, a small Linux VPS for the sensor (I use Hetzner with
 
 ### AWS
 
-Create a versioned bucket and the two IAM users. The policies are in [docs](docs/documentation.md#policies), saved here as `sensor-policy.json` and `analyst-policy.json`.
-
-```bash
-aws s3api create-bucket --bucket <BUCKET> --region eu-north-1 \
-    --create-bucket-configuration LocationConstraint=eu-north-1
-aws s3api put-bucket-versioning --bucket <BUCKET> --versioning-configuration Status=Enabled
-
-for user in sensor analyst; do
-    aws iam create-user --user-name honeypot-$user
-    aws iam put-user-policy --user-name honeypot-$user --policy-name $user-s3 \
-        --policy-document file://$user-policy.json
-    aws iam create-access-key --user-name honeypot-$user
-done
-```
+Create a versioned bucket and the two IAM users. The policies are in [docs](docs/documentation.md#policies), saved here as `sensor-policy.json` and `analyst-policy.json`
 
 The sensor keys go on the server, the analyst keys on your machine.
 
