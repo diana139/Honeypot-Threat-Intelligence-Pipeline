@@ -318,5 +318,3 @@ duckdb warehouse.duckdb -ui
 ```
 
 Close the UI before the DAG runs, DuckDB only allows one writer. Running dbt or the enrichment by hand, DAG parameters and known issues are in [docs](docs/documentation.md#operations).
-
-- [ ] Dashboard on top of the gold layer
